@@ -19,7 +19,7 @@ def get_db():
         host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
         port=int(os.getenv("DB_PORT","4000")),
         user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
-        password=os.getenv("DB_PASSWORD","<PASSWORD>"),
+        password=os.getenv("DB_PASSWORD","FquQuTSKnO1mCkdI"),
         database=os.getenv("DB_NAME","attendtrack"),
     )
     # TiDB requires SSL — set DB_SSL_CA=true in Render env vars
