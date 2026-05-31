@@ -11,16 +11,23 @@ load_dotenv()
 
 app = FastAPI(title="AttendTrack API")
 app.add_middleware(CORSMiddleware,
-    allow_origins=["http://localhost:5173","http://localhost:3000"],
+    allow_origins=["*"],  # Update with your Vercel URL after deploy e.g. "https://attendtrack.vercel.app"
     allow_methods=["*"], allow_headers=["*"])
 
 def get_db():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST","localhost"),
-        user=os.getenv("DB_USER","root"),
-        password=os.getenv("DB_PASSWORD","root"),
+    config = dict(
+        host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
+        port=int(os.getenv("DB_PORT","4000")),
+        user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
+        password=os.getenv("DB_PASSWORD","<PASSWORD>"),
         database=os.getenv("DB_NAME","attendtrack"),
     )
+    # TiDB requires SSL — set DB_SSL_CA=true in Render env vars
+    if os.getenv("DB_SSL_CA"):
+        config["ssl_ca"]             = os.getenv("DB_SSL_CA")
+        config["ssl_verify_cert"]    = True
+        config["ssl_verify_identity"] = True
+    return mysql.connector.connect(**config)
 
 @app.on_event("startup")
 def init_tables():
