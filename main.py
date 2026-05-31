@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
-import mysql.connector, os, csv, io, json
+import pymysql, pymysql.cursors, os, csv, io, json
 from datetime import date, datetime
 from dotenv import load_dotenv
 
@@ -15,19 +15,17 @@ app.add_middleware(CORSMiddleware,
     allow_methods=["*"], allow_headers=["*"])
 
 def get_db():
-    config = dict(
+    ssl = {"ssl": {"ssl_mode": "REQUIRED"}} if os.getenv("DB_SSL", "true").lower() == "true" else {}
+    return pymysql.connect(
         host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
         port=int(os.getenv("DB_PORT","4000")),
         user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
         password=os.getenv("DB_PASSWORD","FquQuTSKnO1mCkdI"),
         database=os.getenv("DB_NAME","attendtrack"),
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=False,
+        **ssl
     )
-    # TiDB requires SSL — set DB_SSL_CA=true in Render env vars
-    if os.getenv("DB_SSL_CA"):
-        config["ssl_ca"]             = os.getenv("DB_SSL_CA")
-        config["ssl_verify_cert"]    = True
-        config["ssl_verify_identity"] = True
-    return mysql.connector.connect(**config)
 
 @app.on_event("startup")
 def init_tables():
@@ -79,6 +77,8 @@ def init_tables():
         print(f"Startup warning: {e}")
 
 def row_to_dict(cursor, row):
+    # PyMySQL DictCursor already returns dicts
+    if isinstance(row, dict): return row
     return dict(zip([c[0] for c in cursor.description], row))
 
 def time_to_str(t):
@@ -122,7 +122,7 @@ class SettingsUpdate(BaseModel):
 def list_employees():
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT id,full_name,email,aadhaar_no,department,shift_hrs,created_at FROM employees ORDER BY full_name")
-    result = [row_to_dict(cur, r) for r in cur.fetchall()]
+    result = list(cur.fetchall())
     for r in result: r["created_at"] = str(r["created_at"])
     db.close(); return result
 
@@ -132,9 +132,9 @@ def get_all_faces():
     cur.execute("SELECT id,full_name,face_descriptor FROM employees WHERE face_descriptor IS NOT NULL")
     result = []
     for row in cur.fetchall():
-        fd = row[2]
+        fd = row["face_descriptor"]
         if isinstance(fd, str): fd = json.loads(fd)
-        result.append({"id": row[0], "full_name": row[1], "face_descriptor": fd})
+        result.append({"id": row["id"], "full_name": row["full_name"], "face_descriptor": fd})
     db.close(); return result
 
 @app.get("/employees/{emp_id}")
@@ -143,8 +143,8 @@ def get_employee(emp_id: int):
     cur.execute("SELECT id,full_name,email,aadhaar_no,department,shift_hrs,created_at FROM employees WHERE id=%s", (emp_id,))
     row = cur.fetchone()
     if not row: db.close(); raise HTTPException(404,"Employee not found")
-    d = row_to_dict(cur, row); d["created_at"] = str(d["created_at"])
-    db.close(); return d
+    row["created_at"] = str(row["created_at"])
+    db.close(); return row
 
 @app.post("/employees", status_code=201)
 def create_employee(emp: EmployeeCreate):
@@ -155,7 +155,7 @@ def create_employee(emp: EmployeeCreate):
             "INSERT INTO employees (full_name,email,aadhaar_no,department,shift_hrs,face_descriptor) VALUES (%s,%s,%s,%s,%s,%s)",
             (emp.full_name, emp.email, emp.aadhaar_no, emp.department, emp.shift_hrs, fd))
         db.commit(); new_id = cur.lastrowid
-    except mysql.connector.IntegrityError as e:
+    except pymysql.IntegrityError as e:
         db.close(); raise HTTPException(409, str(e))
     db.close(); return {"message":"Employee registered","id": new_id}
 
@@ -181,7 +181,7 @@ def clock(action: ClockAction):
     cur.execute("SELECT * FROM employees WHERE id=%s", (action.emp_id,))
     row = cur.fetchone()
     if not row: db.close(); raise HTTPException(404,"Employee not found")
-    emp = row_to_dict(cur, row); shift = float(emp["shift_hrs"])
+    emp = row; shift = float(emp["shift_hrs"])
     cur.execute("SELECT * FROM attendance WHERE emp_id=%s AND date=%s", (action.emp_id, today))
     att_row = cur.fetchone()
     if att_row is None:
@@ -189,7 +189,7 @@ def clock(action: ClockAction):
                     (action.emp_id, today, now_time))
         db.commit(); db.close()
         return {"action":"clock_in","time":now_time,"emp_name":emp["full_name"]}
-    att = row_to_dict(cur, att_row)
+    att = att_row
     ci = time_to_str(att["clock_in"]); co = time_to_str(att["clock_out"])
     if ci and not co:
         in_min  = int(ci[:2])*60 + int(ci[3:5])
@@ -216,8 +216,7 @@ def get_attendance(emp_id: Optional[int]=None, month: Optional[str]=None, date_f
     q += " ORDER BY a.date DESC,e.full_name"
     cur.execute(q, p)
     result = []
-    for r in cur.fetchall():
-        d = row_to_dict(cur, r)
+    for d in cur.fetchall():
         d["clock_in"]  = time_to_str(d["clock_in"])
         d["clock_out"] = time_to_str(d["clock_out"])
         d["date"]      = str(d["date"])
@@ -234,20 +233,20 @@ def dashboard():
     db = get_db(); cur = db.cursor()
     today = date.today().isoformat()
     cur.execute("SELECT COUNT(*) FROM employees")
-    total = cur.fetchone()[0] or 0
+    total = list(cur.fetchone().values())[0] or 0
     cur.execute("SELECT COUNT(*) FROM attendance WHERE date=%s AND status IN ('present','on-duty')",(today,))
-    present = cur.fetchone()[0] or 0
+    present = list(cur.fetchone().values())[0] or 0
     cur.execute("""SELECT COUNT(*) FROM employees WHERE id NOT IN
         (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""",(today,))
-    absent = cur.fetchone()[0] or 0
+    absent = list(cur.fetchone().values())[0] or 0
     cur.execute("SELECT COALESCE(SUM(ot_hrs),0) FROM attendance WHERE date=%s",(today,))
-    ot = float(cur.fetchone()[0] or 0)
+    ot = float(list(cur.fetchone().values())[0] or 0)
     cur.execute("""SELECT a.emp_id,a.clock_in,e.full_name FROM attendance a
         JOIN employees e ON a.emp_id=e.id WHERE a.date=%s AND a.status='on-duty'""",(today,))
-    on_duty = [{"emp_id":r[0],"clock_in":time_to_str(r[1]),"name":r[2]} for r in cur.fetchall()]
+    on_duty = [{"emp_id":r["emp_id"],"clock_in":time_to_str(r["clock_in"]),"name":r["full_name"]} for r in cur.fetchall()]
     cur.execute("""SELECT id,full_name,department FROM employees WHERE id NOT IN
         (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""",(today,))
-    absent_list = [{"id":r[0],"name":r[1],"dept":r[2]} for r in cur.fetchall()]
+    absent_list = [{"id":r["id"],"name":r["full_name"],"dept":r["department"]} for r in cur.fetchall()]
     db.close()
     return {"total_employees":total,"present":present,"absent":absent,
             "ot_hours":round(ot,1),"on_duty":on_duty,"absent_employees":absent_list}
@@ -259,8 +258,8 @@ def get_settings():
     cur.execute("SELECT pay_per_day,ot_pay_per_hr,food_allowance,food_before_time,tds_amount FROM admin_settings WHERE id=1")
     row = cur.fetchone(); db.close()
     if not row: return {"pay_per_day":500.0,"ot_pay_per_hr":100.0,"food_allowance":50.0,"food_before_time":"08:00","tds_amount":13.0}
-    return {"pay_per_day":float(row[0]),"ot_pay_per_hr":float(row[1]),
-            "food_allowance":float(row[2]),"food_before_time":row[3],"tds_amount":float(row[4])}
+    return {"pay_per_day":float(row["pay_per_day"]),"ot_pay_per_hr":float(row["ot_pay_per_hr"]),
+            "food_allowance":float(row["food_allowance"]),"food_before_time":row["food_before_time"],"tds_amount":float(row["tds_amount"])}
 
 @app.put("/settings")
 def update_settings(s: SettingsUpdate):
