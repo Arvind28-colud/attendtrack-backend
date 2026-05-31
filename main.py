@@ -11,7 +11,7 @@ load_dotenv()
 
 app = FastAPI(title="AttendTrack API")
 app.add_middleware(CORSMiddleware,
-    allow_origins=["*"],  # Update with your Vercel URL after deploy e.g. "https://attendtrack.vercel.app"
+    allow_origins=["https://attendtrack-frontend-afmnkpluw-arvind28-coluds-projects.vercel.app"],  # Update with your Vercel URL after deploy e.g. "https://attendtrack.vercel.app"
     allow_methods=["*"], allow_headers=["*"])
 
 def get_db():
