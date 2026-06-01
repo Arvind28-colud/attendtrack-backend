@@ -11,8 +11,10 @@ load_dotenv()
 
 app = FastAPI(title="AttendTrack API")
 app.add_middleware(CORSMiddleware,
-    allow_origins=["https://attendtrack-frontend-afmnkpluw-arvind28-coluds-projects.vercel.app"],  # Update with your Vercel URL after deploy e.g. "https://attendtrack.vercel.app"
-    allow_methods=["*"], allow_headers=["*"])
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+    allow_headers=["*"])
 
 def get_db():
     ssl = {"ssl": {"ssl_mode": "REQUIRED"}} if os.getenv("DB_SSL", "true").lower() == "true" else {}
