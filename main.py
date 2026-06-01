@@ -5,6 +5,9 @@ from pydantic import BaseModel
 from typing import Optional, List
 import pymysql, pymysql.cursors, os, csv, io, json
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -178,8 +181,9 @@ def delete_employee(emp_id: int):
 @app.post("/clock")
 def clock(action: ClockAction):
     db = get_db(); cur = db.cursor()
-    today    = date.today().isoformat()
-    now_time = datetime.now().strftime("%H:%M")
+    now_ist  = datetime.now(IST)
+    today    = now_ist.date().isoformat()
+    now_time = now_ist.strftime("%H:%M")
     cur.execute("SELECT * FROM employees WHERE id=%s", (action.emp_id,))
     row = cur.fetchone()
     if not row: db.close(); raise HTTPException(404,"Employee not found")
@@ -227,13 +231,13 @@ def get_attendance(emp_id: Optional[int]=None, month: Optional[str]=None, date_f
 
 @app.get("/attendance/today")
 def get_today():
-    return get_attendance(date_filter=date.today().isoformat())
+    return get_attendance(date_filter=datetime.now(IST).date().isoformat())
 
 # ── DASHBOARD ───────────────────────────────────────────────────────────────
 @app.get("/dashboard")
 def dashboard():
     db = get_db(); cur = db.cursor()
-    today = date.today().isoformat()
+    today = datetime.now(IST).date().isoformat()
     cur.execute("SELECT COUNT(*) FROM employees")
     total = list(cur.fetchone().values())[0] or 0
     cur.execute("SELECT COUNT(*) FROM attendance WHERE date=%s AND status IN ('present','on-duty')",(today,))
