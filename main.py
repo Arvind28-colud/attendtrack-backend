@@ -22,10 +22,10 @@ app.add_middleware(CORSMiddleware,
 def get_db():
     ssl = {"ssl": {"ssl_mode": "REQUIRED"}} if os.getenv("DB_SSL", "true").lower() == "true" else {}
     return pymysql.connect(
-        host=os.getenv("DB_HOST","localhost"),
-        port=int(os.getenv("DB_PORT","3306")),
-        user=os.getenv("DB_USER","root"),
-        password=os.getenv("DB_PASSWORD",""),
+        host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
+        port=int(os.getenv("DB_PORT","4000")),
+        user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
+        password=os.getenv("DB_PASSWORD","LUkrukogmL3hqLf0"),
         database=os.getenv("DB_NAME","attendtrack"),
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
