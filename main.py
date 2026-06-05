@@ -26,7 +26,7 @@ def get_db():
         host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
         port=int(os.getenv("DB_PORT","4000")),
         user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
-        password=os.getenv("DB_PASSWORD","9BGPkjk73m01luvy"),
+        password=os.getenv("DB_PASSWORD","LUkrukogmL3hqLf0"),
         database=os.getenv("DB_NAME","attendtrack"),
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
@@ -48,9 +48,13 @@ def init_tables():
             location        VARCHAR(200),
             source          VARCHAR(150),
             shift_hrs       DECIMAL(4,1) DEFAULT 8.0,
-            face_descriptor JSON,
-            face_image      LONGTEXT,
-            aadhaar_pdf     LONGTEXT,
+            face_descriptor  JSON,
+            face_image       LONGTEXT,
+            aadhaar_pdf      LONGTEXT,
+            account_name     VARCHAR(150),
+            account_number   VARCHAR(30),
+            ifsc             VARCHAR(15),
+            pan              VARCHAR(12),
             created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
         cur.execute("""CREATE TABLE IF NOT EXISTS attendance (
             id        INT AUTO_INCREMENT PRIMARY KEY,
@@ -80,6 +84,10 @@ def init_tables():
             ("father_name",      "VARCHAR(150)"),
             ("face_image",       "LONGTEXT"),
             ("aadhaar_pdf",      "LONGTEXT"),
+            ("account_name",     "VARCHAR(150)"),
+            ("account_number",   "VARCHAR(30)"),
+            ("ifsc",             "VARCHAR(15)"),
+            ("pan",              "VARCHAR(12)"),
         ]:
             try:
                 cur.execute(f"ALTER TABLE employees ADD COLUMN {col} {defn}")
@@ -126,6 +134,10 @@ class EmployeeCreate(BaseModel):
     source:          Optional[str] = None
     shift_hrs:       float = 8.0
     face_descriptor: Optional[List[float]] = None
+    account_name:    Optional[str] = None
+    account_number:  Optional[str] = None
+    ifsc:            Optional[str] = None
+    pan:             Optional[str] = None
 
 class FaceDescriptorUpdate(BaseModel):
     face_descriptor: List[float]
@@ -152,7 +164,8 @@ def list_employees():
     db = get_db(); cur = db.cursor()
     cur.execute("""SELECT id, full_name, father_name, email, phone, aadhaar_no,
                           department, location, source, shift_hrs,
-                          face_image, aadhaar_pdf, created_at
+                          face_image, aadhaar_pdf,
+                          account_name, account_number, ifsc, pan, created_at
                    FROM employees ORDER BY full_name""")
     result = list(cur.fetchall())
     for r in result:
@@ -175,7 +188,8 @@ def get_employee(emp_id: int):
     db = get_db(); cur = db.cursor()
     cur.execute("""SELECT id, full_name, father_name, email, phone, aadhaar_no,
                           department, location, source, shift_hrs,
-                          face_image, aadhaar_pdf, created_at
+                          face_image, aadhaar_pdf,
+                          account_name, account_number, ifsc, pan, created_at
                    FROM employees WHERE id=%s""", (emp_id,))
     row = cur.fetchone()
     if not row: db.close(); raise HTTPException(404, "Employee not found")
@@ -190,11 +204,13 @@ def create_employee(emp: EmployeeCreate):
         cur.execute(
             """INSERT INTO employees
                (full_name, father_name, email, phone, aadhaar_no,
-                department, location, source, shift_hrs, face_descriptor)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                department, location, source, shift_hrs, face_descriptor,
+                account_name, account_number, ifsc, pan)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (emp.full_name, emp.father_name, emp.email, emp.phone,
              emp.aadhaar_no, emp.department, emp.location,
-             emp.source, emp.shift_hrs, fd))
+             emp.source, emp.shift_hrs, fd,
+             emp.account_name, emp.account_number, emp.ifsc, emp.pan))
         db.commit(); new_id = cur.lastrowid
     except pymysql.IntegrityError as e:
         db.close(); raise HTTPException(409, str(e))
