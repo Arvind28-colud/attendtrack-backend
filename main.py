@@ -151,6 +151,9 @@ class AadhaarPdfUpdate(BaseModel):
 class ClockAction(BaseModel):
     emp_id: int
 
+class ManualClockOut(BaseModel):
+    clock_out_time: str  # HH:MM
+
 class SettingsUpdate(BaseModel):
     pay_per_day:      float
     ot_pay_per_hr:    float
@@ -275,6 +278,27 @@ def clock(action: ClockAction):
         return {"action": "clock_out", "time": now_time,
                 "total_hrs": total, "ot_hrs": ot, "emp_name": emp["full_name"]}
     db.close(); raise HTTPException(400, "Already completed attendance today")
+
+@app.put("/attendance/{emp_id}/manual-clockout")
+def manual_clock_out(emp_id: int, date: str, body: ManualClockOut):
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT * FROM attendance WHERE emp_id=%s AND date=%s", (emp_id, date))
+    att = cur.fetchone()
+    if not att: db.close(); raise HTTPException(404, "Attendance record not found")
+    ci = time_to_str(att["clock_in"])
+    if not ci: db.close(); raise HTTPException(400, "No clock-in recorded")
+    co = body.clock_out_time
+    in_min  = int(ci[:2])*60 + int(ci[3:5])
+    out_min = int(co[:2])*60 + int(co[3:5])
+    total   = round((out_min - in_min) / 60, 2)
+    cur.execute("SELECT shift_hrs FROM employees WHERE id=%s", (emp_id,))
+    emp_row = cur.fetchone()
+    shift   = float(emp_row["shift_hrs"]) if emp_row else 8.0
+    ot      = round(max(0, total - shift), 2)
+    cur.execute("""UPDATE attendance SET clock_out=%s, total_hrs=%s, ot_hrs=%s, status='present'
+                   WHERE emp_id=%s AND date=%s""", (co, total, ot, emp_id, date))
+    db.commit(); db.close()
+    return {"message": "Clock-out recorded", "clock_out": co, "total_hrs": total, "ot_hrs": ot}
 
 # ── ATTENDANCE ───────────────────────────────────────────────────────────────
 @app.get("/attendance")
