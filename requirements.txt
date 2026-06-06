@@ -4,8 +4,5 @@ PyMySQL>=1.1.0
 cryptography>=41.0.0
 pydantic>=2.7.1
 python-multipart>=0.0.9
-<<<<<<< HEAD
 python-dotenv>=1.0.1
-=======
 python-dotenv>=1.0.1
->>>>>>> a7a483d215d21778135029b1996678be313b67a8
