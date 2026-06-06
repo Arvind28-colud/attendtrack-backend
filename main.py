@@ -67,6 +67,14 @@ def init_tables():
             status    ENUM('on-duty','present','absent') DEFAULT 'absent',
             UNIQUE KEY unique_emp_date (emp_id, date),
             FOREIGN KEY (emp_id) REFERENCES employees(id) ON DELETE CASCADE)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS sources (
+            id             INT AUTO_INCREMENT PRIMARY KEY,
+            name           VARCHAR(150) UNIQUE NOT NULL,
+            account_name   VARCHAR(150),
+            account_number VARCHAR(30),
+            ifsc           VARCHAR(15),
+            pan            VARCHAR(12),
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
         cur.execute("""CREATE TABLE IF NOT EXISTS admin_settings (
             id               INT AUTO_INCREMENT PRIMARY KEY,
             pay_per_day      DECIMAL(10,2) DEFAULT 500.00,
@@ -147,6 +155,13 @@ class FaceImageUpdate(BaseModel):
 
 class AadhaarPdfUpdate(BaseModel):
     aadhaar_pdf: str  # base64 string
+
+class SourceCreate(BaseModel):
+    name:           str
+    account_name:   Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc:           Optional[str] = None
+    pan:            Optional[str] = None
 
 class ClockAction(BaseModel):
     emp_id: int
@@ -244,6 +259,51 @@ def update_aadhaar_pdf(emp_id: int, body: AadhaarPdfUpdate):
 def delete_employee(emp_id: int):
     db = get_db(); cur = db.cursor()
     cur.execute("DELETE FROM employees WHERE id=%s", (emp_id,))
+    db.commit(); db.close(); return {"message": "Removed"}
+
+# ── SOURCES ──────────────────────────────────────────────────────────
+@app.get("/sources")
+def list_sources():
+    db = get_db(); cur = db.cursor()
+    cur.execute("""SELECT id, name, account_name, account_number, ifsc, pan, created_at
+                   FROM sources ORDER BY name""")
+    result = list(cur.fetchall())
+    for r in result:
+        r["created_at"] = str(r["created_at"])
+    db.close(); return result
+
+@app.post("/sources", status_code=201)
+def create_source(s: SourceCreate):
+    if not s.name.strip(): raise HTTPException(400, "Source name is required")
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO sources (name, account_name, account_number, ifsc, pan)
+               VALUES (%s,%s,%s,%s,%s)""",
+            (s.name.strip(), s.account_name, s.account_number, s.ifsc, s.pan))
+        db.commit(); new_id = cur.lastrowid
+    except pymysql.IntegrityError:
+        db.close(); raise HTTPException(409, "Source already exists")
+    db.close(); return {"message": "Source added", "id": new_id}
+
+@app.put("/sources/{source_id}")
+def update_source(source_id: int, s: SourceCreate):
+    if not s.name.strip(): raise HTTPException(400, "Source name is required")
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute(
+            """UPDATE sources SET name=%s, account_name=%s, account_number=%s, ifsc=%s, pan=%s
+               WHERE id=%s""",
+            (s.name.strip(), s.account_name, s.account_number, s.ifsc, s.pan, source_id))
+        db.commit()
+    except pymysql.IntegrityError:
+        db.close(); raise HTTPException(409, "Source name already exists")
+    db.close(); return {"message": "Source updated"}
+
+@app.delete("/sources/{source_id}")
+def delete_source(source_id: int):
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM sources WHERE id=%s", (source_id,))
     db.commit(); db.close(); return {"message": "Removed"}
 
 # ── CLOCK IN / OUT ───────────────────────────────────────────────────────────
