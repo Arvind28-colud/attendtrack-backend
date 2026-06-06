@@ -49,8 +49,8 @@ def init_tables():
             source          VARCHAR(150),
             shift_hrs       DECIMAL(4,1) DEFAULT 8.0,
             face_descriptor  JSON,
-            face_image       LONGTEXT,
-            aadhaar_pdf      LONGTEXT,
+            face_image       VARCHAR(500),
+            aadhaar_pdf      VARCHAR(500),
             account_name     VARCHAR(150),
             account_number   VARCHAR(30),
             ifsc             VARCHAR(15),
@@ -90,8 +90,8 @@ def init_tables():
             ("food_before_time", "VARCHAR(5)    DEFAULT '08:00'"),
             ("tds_amount",       "DECIMAL(10,2) DEFAULT 13.00"),
             ("father_name",      "VARCHAR(150)"),
-            ("face_image",       "LONGTEXT"),
-            ("aadhaar_pdf",      "LONGTEXT"),
+            ("face_image",       "VARCHAR(500)"),
+            ("aadhaar_pdf",      "VARCHAR(500)"), 
             ("account_name",     "VARCHAR(150)"),
             ("account_number",   "VARCHAR(30)"),
             ("ifsc",             "VARCHAR(15)"),
@@ -147,7 +147,6 @@ class EmployeeCreate(BaseModel):
     ifsc:            Optional[str] = None
     pan:             Optional[str] = None
 
-
 class SourcePerson(BaseModel):
     name:           str
     account_name:   Optional[str] = None
@@ -155,15 +154,14 @@ class SourcePerson(BaseModel):
     ifsc:           Optional[str] = None
     pan:            Optional[str] = None
 
-
 class FaceDescriptorUpdate(BaseModel):
     face_descriptor: List[float]
 
 class FaceImageUpdate(BaseModel):
-    face_image: str   # base64 string
+    face_image: str   # Cloudinary URL
 
 class AadhaarPdfUpdate(BaseModel):
-    aadhaar_pdf: str  # base64 string
+    aadhaar_pdf: str  # Cloudinary URL
 
 class ClockAction(BaseModel):
     emp_id: int
@@ -468,6 +466,4 @@ def report_csv(month: Optional[str]=None, date_filter: Optional[str]=None, emp_i
     return StreamingResponse(
         iter([out.getvalue()]),
         media_type="text/csv",
-
         headers={"Content-Disposition": f"attachment; filename=attendance_{label}.csv"})
-
