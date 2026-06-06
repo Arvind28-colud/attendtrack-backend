@@ -3,23 +3,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
-import mysql.connector, os, csv, io, json
+from collections import defaultdict
+import pymysql, pymysql.cursors, os, csv, io, json
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = FastAPI(title="AttendTrack API")
 app.add_middleware(CORSMiddleware,
-    allow_origins=["http://localhost:5173","http://localhost:3000"],
-    allow_methods=["*"], allow_headers=["*"])
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET","POST","PUT","DELETE","OPTIONS"],
+    allow_headers=["*"])
 
 def get_db():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST","localhost"),
-        user=os.getenv("DB_USER","root"),
-        password=os.getenv("DB_PASSWORD","root"),
+    ssl = {"ssl": {"ssl_mode": "REQUIRED"}} if os.getenv("DB_SSL", "true").lower() == "true" else {}
+    return pymysql.connect(
+        host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
+        port=int(os.getenv("DB_PORT","4000")),
+        user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
+        password=os.getenv("DB_PASSWORD","LUkrukogmL3hqLf0"),
         database=os.getenv("DB_NAME","attendtrack"),
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=False,
+        **ssl
     )
 
 @app.on_event("startup")
@@ -29,11 +40,21 @@ def init_tables():
         cur.execute("""CREATE TABLE IF NOT EXISTS employees (
             id              INT AUTO_INCREMENT PRIMARY KEY,
             full_name       VARCHAR(150) NOT NULL,
+            father_name     VARCHAR(150),
             email           VARCHAR(255) UNIQUE NOT NULL,
+            phone           VARCHAR(15),
             aadhaar_no      VARCHAR(12)  UNIQUE NOT NULL,
             department      VARCHAR(100) NOT NULL,
+            location        VARCHAR(200),
+            source          VARCHAR(150),
             shift_hrs       DECIMAL(4,1) DEFAULT 8.0,
-            face_descriptor JSON,
+            face_descriptor  JSON,
+            face_image       LONGTEXT,
+            aadhaar_pdf      LONGTEXT,
+            account_name     VARCHAR(150),
+            account_number   VARCHAR(30),
+            ifsc             VARCHAR(15),
+            pan              VARCHAR(12),
             created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
         cur.execute("""CREATE TABLE IF NOT EXISTS attendance (
             id        INT AUTO_INCREMENT PRIMARY KEY,
@@ -46,6 +67,14 @@ def init_tables():
             status    ENUM('on-duty','present','absent') DEFAULT 'absent',
             UNIQUE KEY unique_emp_date (emp_id, date),
             FOREIGN KEY (emp_id) REFERENCES employees(id) ON DELETE CASCADE)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS source_persons (
+            id         INT AUTO_INCREMENT PRIMARY KEY,
+            name       VARCHAR(150) NOT NULL UNIQUE,
+            account_name   VARCHAR(150),
+            account_number VARCHAR(30),
+            ifsc           VARCHAR(15),
+            pan            VARCHAR(12),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
         cur.execute("""CREATE TABLE IF NOT EXISTS admin_settings (
             id               INT AUTO_INCREMENT PRIMARY KEY,
             pay_per_day      DECIMAL(10,2) DEFAULT 500.00,
@@ -54,7 +83,23 @@ def init_tables():
             food_before_time VARCHAR(5)    DEFAULT '08:00',
             tds_amount       DECIMAL(10,2) DEFAULT 13.00,
             updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)""")
-        # Add new columns if upgrading from old schema
+
+        # Upgrade existing schema — add missing columns if not present
+        for col, defn in [
+            ("food_allowance",   "DECIMAL(10,2) DEFAULT 50.00"),
+            ("food_before_time", "VARCHAR(5)    DEFAULT '08:00'"),
+            ("tds_amount",       "DECIMAL(10,2) DEFAULT 13.00"),
+            ("father_name",      "VARCHAR(150)"),
+            ("face_image",       "LONGTEXT"),
+            ("aadhaar_pdf",      "LONGTEXT"),
+            ("account_name",     "VARCHAR(150)"),
+            ("account_number",   "VARCHAR(30)"),
+            ("ifsc",             "VARCHAR(15)"),
+            ("pan",              "VARCHAR(12)"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE employees ADD COLUMN {col} {defn}")
+            except: pass
         for col, defn in [
             ("food_allowance",   "DECIMAL(10,2) DEFAULT 50.00"),
             ("food_before_time", "VARCHAR(5)    DEFAULT '08:00'"),
@@ -63,6 +108,7 @@ def init_tables():
             try:
                 cur.execute(f"ALTER TABLE admin_settings ADD COLUMN {col} {defn}")
             except: pass
+
         cur.execute("""INSERT IGNORE INTO admin_settings
             (id,pay_per_day,ot_pay_per_hr,food_allowance,food_before_time,tds_amount)
             VALUES (1,500.00,100.00,50.00,'08:00',13.00)""")
@@ -70,9 +116,6 @@ def init_tables():
         print("Tables ready")
     except Exception as e:
         print(f"Startup warning: {e}")
-
-def row_to_dict(cursor, row):
-    return dict(zip([c[0] for c in cursor.description], row))
 
 def time_to_str(t):
     if t is None: return None
@@ -84,60 +127,92 @@ def time_to_str(t):
     return str(t)[:5]
 
 def time_before(t_str, limit_str):
-    """Returns True if t_str (HH:MM) is before limit_str (HH:MM)."""
     if not t_str: return False
     return t_str <= limit_str
 
-# ── Models ──────────────────────────────────────────────────────────────────
+# ── Models ───────────────────────────────────────────────────────────────────
 class EmployeeCreate(BaseModel):
-    full_name: str
-    email: str
-    aadhaar_no: str
-    department: str
-    shift_hrs: float = 8.0
+    full_name:       str
+    father_name:     Optional[str] = None
+    email:           str
+    phone:           Optional[str] = None
+    aadhaar_no:      str
+    department:      str
+    location:        Optional[str] = None
+    source:          Optional[str] = None
+    shift_hrs:       float = 8.0
     face_descriptor: Optional[List[float]] = None
+    account_name:    Optional[str] = None
+    account_number:  Optional[str] = None
+    ifsc:            Optional[str] = None
+    pan:             Optional[str] = None
+
+class SourcePerson(BaseModel):
+    name:           str
+    account_name:   Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc:           Optional[str] = None
+    pan:            Optional[str] = None
 
 class FaceDescriptorUpdate(BaseModel):
     face_descriptor: List[float]
 
+class FaceImageUpdate(BaseModel):
+    face_image: str   # base64 string
+
+class AadhaarPdfUpdate(BaseModel):
+    aadhaar_pdf: str  # base64 string
+
 class ClockAction(BaseModel):
     emp_id: int
 
-class SettingsUpdate(BaseModel):
-    pay_per_day: float
-    ot_pay_per_hr: float
-    food_allowance: float
-    food_before_time: str
-    tds_amount: float
+class ManualClockOut(BaseModel):
+    clock_out_time: str  # HH:MM
 
-# ── EMPLOYEES ───────────────────────────────────────────────────────────────
+class SettingsUpdate(BaseModel):
+    pay_per_day:      float
+    ot_pay_per_hr:    float
+    food_allowance:   float
+    food_before_time: str
+    tds_amount:       float
+
+# ── EMPLOYEES ────────────────────────────────────────────────────────────────
 @app.get("/employees")
 def list_employees():
     db = get_db(); cur = db.cursor()
-    cur.execute("SELECT id,full_name,email,aadhaar_no,department,shift_hrs,created_at FROM employees ORDER BY full_name")
-    result = [row_to_dict(cur, r) for r in cur.fetchall()]
-    for r in result: r["created_at"] = str(r["created_at"])
+    cur.execute("""SELECT id, full_name, father_name, email, phone, aadhaar_no,
+                          department, location, source, shift_hrs,
+                          face_image, aadhaar_pdf,
+                          account_name, account_number, ifsc, pan, created_at
+                   FROM employees ORDER BY full_name""")
+    result = list(cur.fetchall())
+    for r in result:
+        r["created_at"] = str(r["created_at"])
     db.close(); return result
 
 @app.get("/employees/faces/all")
 def get_all_faces():
     db = get_db(); cur = db.cursor()
-    cur.execute("SELECT id,full_name,face_descriptor FROM employees WHERE face_descriptor IS NOT NULL")
+    cur.execute("SELECT id, full_name, face_descriptor FROM employees WHERE face_descriptor IS NOT NULL")
     result = []
     for row in cur.fetchall():
-        fd = row[2]
+        fd = row["face_descriptor"]
         if isinstance(fd, str): fd = json.loads(fd)
-        result.append({"id": row[0], "full_name": row[1], "face_descriptor": fd})
+        result.append({"id": row["id"], "full_name": row["full_name"], "face_descriptor": fd})
     db.close(); return result
 
 @app.get("/employees/{emp_id}")
 def get_employee(emp_id: int):
     db = get_db(); cur = db.cursor()
-    cur.execute("SELECT id,full_name,email,aadhaar_no,department,shift_hrs,created_at FROM employees WHERE id=%s", (emp_id,))
+    cur.execute("""SELECT id, full_name, father_name, email, phone, aadhaar_no,
+                          department, location, source, shift_hrs,
+                          face_image, aadhaar_pdf,
+                          account_name, account_number, ifsc, pan, created_at
+                   FROM employees WHERE id=%s""", (emp_id,))
     row = cur.fetchone()
-    if not row: db.close(); raise HTTPException(404,"Employee not found")
-    d = row_to_dict(cur, row); d["created_at"] = str(d["created_at"])
-    db.close(); return d
+    if not row: db.close(); raise HTTPException(404, "Employee not found")
+    row["created_at"] = str(row["created_at"])
+    db.close(); return row
 
 @app.post("/employees", status_code=201)
 def create_employee(emp: EmployeeCreate):
@@ -145,72 +220,145 @@ def create_employee(emp: EmployeeCreate):
     try:
         fd = json.dumps(emp.face_descriptor) if emp.face_descriptor else None
         cur.execute(
-            "INSERT INTO employees (full_name,email,aadhaar_no,department,shift_hrs,face_descriptor) VALUES (%s,%s,%s,%s,%s,%s)",
-            (emp.full_name, emp.email, emp.aadhaar_no, emp.department, emp.shift_hrs, fd))
+            """INSERT INTO employees
+               (full_name, father_name, email, phone, aadhaar_no,
+                department, location, source, shift_hrs, face_descriptor,
+                account_name, account_number, ifsc, pan)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (emp.full_name, emp.father_name, emp.email, emp.phone,
+             emp.aadhaar_no, emp.department, emp.location,
+             emp.source, emp.shift_hrs, fd,
+             emp.account_name, emp.account_number, emp.ifsc, emp.pan))
         db.commit(); new_id = cur.lastrowid
-    except mysql.connector.IntegrityError as e:
+    except pymysql.IntegrityError as e:
         db.close(); raise HTTPException(409, str(e))
-    db.close(); return {"message":"Employee registered","id": new_id}
+    db.close(); return {"message": "Employee registered", "id": new_id}
 
 @app.put("/employees/{emp_id}/face")
 def update_face(emp_id: int, body: FaceDescriptorUpdate):
     db = get_db(); cur = db.cursor()
     cur.execute("UPDATE employees SET face_descriptor=%s WHERE id=%s",
                 (json.dumps(body.face_descriptor), emp_id))
-    db.commit(); db.close(); return {"message":"Face descriptor saved"}
+    db.commit(); db.close(); return {"message": "Face descriptor saved"}
+
+@app.put("/employees/{emp_id}/face-image")
+def update_face_image(emp_id: int, body: FaceImageUpdate):
+    db = get_db(); cur = db.cursor()
+    cur.execute("UPDATE employees SET face_image=%s WHERE id=%s",
+                (body.face_image, emp_id))
+    db.commit(); db.close(); return {"message": "Face image saved"}
+
+@app.put("/employees/{emp_id}/aadhaar-pdf")
+def update_aadhaar_pdf(emp_id: int, body: AadhaarPdfUpdate):
+    db = get_db(); cur = db.cursor()
+    cur.execute("UPDATE employees SET aadhaar_pdf=%s WHERE id=%s",
+                (body.aadhaar_pdf, emp_id))
+    db.commit(); db.close(); return {"message": "Aadhaar PDF saved"}
+
+# Note: face_descriptor stores 512-d ArcFace embeddings (cosine similarity, threshold 0.4)
+
+# ── SOURCE PERSONS ──────────────────────────────────────────────────────────
+@app.get("/source-persons")
+def list_source_persons():
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT * FROM source_persons ORDER BY name")
+    result = list(cur.fetchall())
+    for r in result: r["created_at"] = str(r["created_at"])
+    db.close(); return result
+
+@app.post("/source-persons", status_code=201)
+def create_source_person(sp: SourcePerson):
+    db = get_db(); cur = db.cursor()
+    try:
+        cur.execute("""INSERT INTO source_persons (name,account_name,account_number,ifsc,pan)
+                       VALUES (%s,%s,%s,%s,%s)""",
+                    (sp.name, sp.account_name, sp.account_number, sp.ifsc, sp.pan))
+        db.commit(); new_id = cur.lastrowid
+    except pymysql.IntegrityError as e:
+        db.close(); raise HTTPException(409, "Source person already exists")
+    db.close(); return {"message":"Source person added","id":new_id}
+
+@app.delete("/source-persons/{sp_id}")
+def delete_source_person(sp_id: int):
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM source_persons WHERE id=%s", (sp_id,))
+    db.commit(); db.close(); return {"message":"Removed"}
 
 @app.delete("/employees/{emp_id}")
 def delete_employee(emp_id: int):
     db = get_db(); cur = db.cursor()
     cur.execute("DELETE FROM employees WHERE id=%s", (emp_id,))
-    db.commit(); db.close(); return {"message":"Removed"}
+    db.commit(); db.close(); return {"message": "Removed"}
 
-# ── CLOCK IN / OUT ──────────────────────────────────────────────────────────
+# ── CLOCK IN / OUT ───────────────────────────────────────────────────────────
 @app.post("/clock")
 def clock(action: ClockAction):
     db = get_db(); cur = db.cursor()
-    today    = date.today().isoformat()
-    now_time = datetime.now().strftime("%H:%M")
+    now_ist  = datetime.now(IST)
+    today    = now_ist.date().isoformat()
+    now_time = now_ist.strftime("%H:%M")
     cur.execute("SELECT * FROM employees WHERE id=%s", (action.emp_id,))
     row = cur.fetchone()
-    if not row: db.close(); raise HTTPException(404,"Employee not found")
-    emp = row_to_dict(cur, row); shift = float(emp["shift_hrs"])
+    if not row: db.close(); raise HTTPException(404, "Employee not found")
+    emp = row; shift = float(emp["shift_hrs"])
     cur.execute("SELECT * FROM attendance WHERE emp_id=%s AND date=%s", (action.emp_id, today))
     att_row = cur.fetchone()
     if att_row is None:
         cur.execute("INSERT INTO attendance (emp_id,date,clock_in,status) VALUES (%s,%s,%s,'on-duty')",
                     (action.emp_id, today, now_time))
         db.commit(); db.close()
-        return {"action":"clock_in","time":now_time,"emp_name":emp["full_name"]}
-    att = row_to_dict(cur, att_row)
+        return {"action": "clock_in", "time": now_time, "emp_name": emp["full_name"]}
+    att = att_row
     ci = time_to_str(att["clock_in"]); co = time_to_str(att["clock_out"])
     if ci and not co:
-        in_min  = int(ci[:2])*60 + int(ci[3:5])
-        out_min = int(now_time[:2])*60 + int(now_time[3:5])
-        total   = round((out_min - in_min)/60, 2)
+        in_min  = int(ci[:2]) * 60 + int(ci[3:5])
+        out_min = int(now_time[:2]) * 60 + int(now_time[3:5])
+        total   = round((out_min - in_min) / 60, 2)
         ot      = round(max(0, total - shift), 2)
         cur.execute("""UPDATE attendance SET clock_out=%s,total_hrs=%s,ot_hrs=%s,status='present'
                        WHERE emp_id=%s AND date=%s""",
                     (now_time, total, ot, action.emp_id, today))
         db.commit(); db.close()
-        return {"action":"clock_out","time":now_time,"total_hrs":total,"ot_hrs":ot,"emp_name":emp["full_name"]}
-    db.close(); raise HTTPException(400,"Already completed attendance today")
+        return {"action": "clock_out", "time": now_time,
+                "total_hrs": total, "ot_hrs": ot, "emp_name": emp["full_name"]}
+    db.close(); raise HTTPException(400, "Already completed attendance today")
 
-# ── ATTENDANCE ──────────────────────────────────────────────────────────────
+@app.put("/attendance/{emp_id}/manual-clockout")
+def manual_clock_out(emp_id: int, date: str, body: ManualClockOut):
+    db = get_db(); cur = db.cursor()
+    cur.execute("SELECT * FROM attendance WHERE emp_id=%s AND date=%s", (emp_id, date))
+    att = cur.fetchone()
+    if not att: db.close(); raise HTTPException(404, "Attendance record not found")
+    ci = time_to_str(att["clock_in"])
+    if not ci: db.close(); raise HTTPException(400, "No clock-in recorded")
+    co = body.clock_out_time
+    in_min  = int(ci[:2])*60 + int(ci[3:5])
+    out_min = int(co[:2])*60 + int(co[3:5])
+    total   = round((out_min - in_min) / 60, 2)
+    cur.execute("SELECT shift_hrs FROM employees WHERE id=%s", (emp_id,))
+    emp_row = cur.fetchone()
+    shift   = float(emp_row["shift_hrs"]) if emp_row else 8.0
+    ot      = round(max(0, total - shift), 2)
+    cur.execute("""UPDATE attendance SET clock_out=%s, total_hrs=%s, ot_hrs=%s, status='present'
+                   WHERE emp_id=%s AND date=%s""", (co, total, ot, emp_id, date))
+    db.commit(); db.close()
+    return {"message": "Clock-out recorded", "clock_out": co, "total_hrs": total, "ot_hrs": ot}
+
+# ── ATTENDANCE ───────────────────────────────────────────────────────────────
 @app.get("/attendance")
 def get_attendance(emp_id: Optional[int]=None, month: Optional[str]=None, date_filter: Optional[str]=None):
     db = get_db(); cur = db.cursor()
-    q = """SELECT a.*,e.full_name,e.email,e.aadhaar_no,e.department,e.shift_hrs
+    q = """SELECT a.*, e.full_name, e.email, e.phone, e.aadhaar_no,
+                  e.department, e.location, e.source, e.shift_hrs
            FROM attendance a JOIN employees e ON a.emp_id=e.id WHERE 1=1"""
     p = []
     if emp_id:      q += " AND a.emp_id=%s";                       p.append(emp_id)
     if month:       q += " AND DATE_FORMAT(a.date,'%%Y-%%m')=%s";  p.append(month)
     if date_filter: q += " AND a.date=%s";                         p.append(date_filter)
-    q += " ORDER BY a.date DESC,e.full_name"
+    q += " ORDER BY a.date DESC, e.full_name"
     cur.execute(q, p)
     result = []
-    for r in cur.fetchall():
-        d = row_to_dict(cur, r)
+    for d in cur.fetchall():
         d["clock_in"]  = time_to_str(d["clock_in"])
         d["clock_out"] = time_to_str(d["clock_out"])
         d["date"]      = str(d["date"])
@@ -219,80 +367,103 @@ def get_attendance(emp_id: Optional[int]=None, month: Optional[str]=None, date_f
 
 @app.get("/attendance/today")
 def get_today():
-    return get_attendance(date_filter=date.today().isoformat())
+    return get_attendance(date_filter=datetime.now(IST).date().isoformat())
 
-# ── DASHBOARD ───────────────────────────────────────────────────────────────
+# ── DASHBOARD ────────────────────────────────────────────────────────────────
 @app.get("/dashboard")
 def dashboard():
     db = get_db(); cur = db.cursor()
-    today = date.today().isoformat()
-    cur.execute("SELECT COUNT(*) FROM employees")
-    total = cur.fetchone()[0] or 0
-    cur.execute("SELECT COUNT(*) FROM attendance WHERE date=%s AND status IN ('present','on-duty')",(today,))
-    present = cur.fetchone()[0] or 0
-    cur.execute("""SELECT COUNT(*) FROM employees WHERE id NOT IN
-        (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""",(today,))
-    absent = cur.fetchone()[0] or 0
-    cur.execute("SELECT COALESCE(SUM(ot_hrs),0) FROM attendance WHERE date=%s",(today,))
-    ot = float(cur.fetchone()[0] or 0)
-    cur.execute("""SELECT a.emp_id,a.clock_in,e.full_name FROM attendance a
-        JOIN employees e ON a.emp_id=e.id WHERE a.date=%s AND a.status='on-duty'""",(today,))
-    on_duty = [{"emp_id":r[0],"clock_in":time_to_str(r[1]),"name":r[2]} for r in cur.fetchall()]
-    cur.execute("""SELECT id,full_name,department FROM employees WHERE id NOT IN
-        (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""",(today,))
-    absent_list = [{"id":r[0],"name":r[1],"dept":r[2]} for r in cur.fetchall()]
+    today = datetime.now(IST).date().isoformat()
+    cur.execute("SELECT COUNT(*) as c FROM employees")
+    total = cur.fetchone()["c"] or 0
+    cur.execute("SELECT COUNT(*) as c FROM attendance WHERE date=%s AND status IN ('present','on-duty')", (today,))
+    present = cur.fetchone()["c"] or 0
+    cur.execute("""SELECT COUNT(*) as c FROM employees WHERE id NOT IN
+        (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""", (today,))
+    absent = cur.fetchone()["c"] or 0
+    cur.execute("SELECT COALESCE(SUM(ot_hrs),0) as s FROM attendance WHERE date=%s", (today,))
+    ot = float(cur.fetchone()["s"] or 0)
+    cur.execute("""SELECT a.emp_id, a.clock_in, e.full_name FROM attendance a
+        JOIN employees e ON a.emp_id=e.id
+        WHERE a.date=%s AND a.status='on-duty'""", (today,))
+    on_duty = [{"emp_id": r["emp_id"], "clock_in": time_to_str(r["clock_in"]), "name": r["full_name"]}
+               for r in cur.fetchall()]
+    cur.execute("""SELECT id, full_name, department FROM employees WHERE id NOT IN
+        (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""", (today,))
+    absent_list = [{"id": r["id"], "name": r["full_name"], "dept": r["department"]}
+                   for r in cur.fetchall()]
     db.close()
-    return {"total_employees":total,"present":present,"absent":absent,
-            "ot_hours":round(ot,1),"on_duty":on_duty,"absent_employees":absent_list}
+    return {"total_employees": total, "present": present, "absent": absent,
+            "ot_hours": round(ot, 1), "on_duty": on_duty, "absent_employees": absent_list}
 
-# ── ADMIN SETTINGS ──────────────────────────────────────────────────────────
+# ── ADMIN SETTINGS ───────────────────────────────────────────────────────────
 @app.get("/settings")
 def get_settings():
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT pay_per_day,ot_pay_per_hr,food_allowance,food_before_time,tds_amount FROM admin_settings WHERE id=1")
     row = cur.fetchone(); db.close()
-    if not row: return {"pay_per_day":500.0,"ot_pay_per_hr":100.0,"food_allowance":50.0,"food_before_time":"08:00","tds_amount":13.0}
-    return {"pay_per_day":float(row[0]),"ot_pay_per_hr":float(row[1]),
-            "food_allowance":float(row[2]),"food_before_time":row[3],"tds_amount":float(row[4])}
+    if not row:
+        return {"pay_per_day": 500.0, "ot_pay_per_hr": 100.0,
+                "food_allowance": 50.0, "food_before_time": "08:00", "tds_amount": 13.0}
+    return {"pay_per_day":      float(row["pay_per_day"]),
+            "ot_pay_per_hr":    float(row["ot_pay_per_hr"]),
+            "food_allowance":   float(row["food_allowance"]),
+            "food_before_time": row["food_before_time"],
+            "tds_amount":       float(row["tds_amount"])}
 
 @app.put("/settings")
 def update_settings(s: SettingsUpdate):
     db = get_db(); cur = db.cursor()
     cur.execute("""UPDATE admin_settings
-        SET pay_per_day=%s,ot_pay_per_hr=%s,food_allowance=%s,food_before_time=%s,tds_amount=%s
+        SET pay_per_day=%s, ot_pay_per_hr=%s, food_allowance=%s,
+            food_before_time=%s, tds_amount=%s
         WHERE id=1""",
         (s.pay_per_day, s.ot_pay_per_hr, s.food_allowance, s.food_before_time, s.tds_amount))
-    db.commit(); db.close(); return {"message":"Settings updated"}
+    db.commit(); db.close(); return {"message": "Settings updated"}
 
-# ── REPORTS CSV ─────────────────────────────────────────────────────────────
+# ── REPORTS CSV ──────────────────────────────────────────────────────────────
 @app.get("/reports/csv")
 def report_csv(month: Optional[str]=None, date_filter: Optional[str]=None, emp_id: Optional[int]=None):
     if not month and not date_filter:
-        raise HTTPException(400,"Provide month or date_filter")
+        raise HTTPException(400, "Provide month or date_filter")
     records  = get_attendance(emp_id=emp_id, month=month, date_filter=date_filter)
     s        = get_settings()
     ppd      = s["pay_per_day"]
     otp      = s["ot_pay_per_hr"]
     food_amt = s["food_allowance"]
     food_cut = s["food_before_time"]
-    tds_amt  = s["tds_amount"]
+
+    # Aggregate per employee
+    summary = defaultdict(lambda: {
+        "name": "", "dept": "", "source": "", "location": "",
+        "total": 0, "present": 0, "ot": 0.0, "food": 0.0
+    })
+    for r in records:
+        k = r["emp_id"]; m = summary[k]
+        m["name"]     = r["full_name"]
+        m["dept"]     = r["department"]
+        m["source"]   = r.get("source", "")
+        m["location"] = r.get("location", "")
+        m["total"]   += 1
+        if r["status"] in ("present", "on-duty"):
+            m["present"] += 1
+            if time_before(r["clock_in"], food_cut):
+                m["food"] += food_amt
+        m["ot"] += float(r["ot_hrs"] or 0)
 
     out = io.StringIO(); w = csv.writer(out)
-    w.writerow(["Name","Email","Aadhaar","Department","Date","Clock In","Clock Out",
-                "Total Hrs","OT Hrs","Status",
-                "Day Pay (Rs)","OT Pay (Rs)","Food Allowance (Rs)",
-                "Gross (Rs)","TDS Deducted (Rs)","Net Pay (Rs)"])
-    for r in records:
-        day_pay  = ppd if r["status"] == "present" else 0
-        ot_pay   = round(float(r["ot_hrs"] or 0) * otp, 2)
-        food     = food_amt if (r["status"] in ("present","on-duty") and time_before(r["clock_in"], food_cut)) else 0
-        gross    = round(day_pay + ot_pay + food, 2)
-        tds      = tds_amt if day_pay > 0 else 0   # flat rupee deduction per present day
-        net      = round(gross - tds, 2)
-        w.writerow([r["full_name"],r["email"],r["aadhaar_no"],r["department"],r["date"],
-                    r["clock_in"] or "",r["clock_out"] or "",r["total_hrs"],r["ot_hrs"],r["status"],
-                    day_pay, ot_pay, food, gross, tds, net])
+    w.writerow(["Employee Name", "Department", "Source", "Location",
+                "Total Days", "OT Hours", "Day Pay (Rs)", "OT Pay (Rs)", "Food Allowance (Rs)"])
+    for m in summary.values():
+        day_pay = round(m["present"] * ppd, 2)
+        ot_pay  = round(m["ot"] * otp, 2)
+        w.writerow([m["name"], m["dept"], m["source"], m["location"],
+                    m["total"], round(m["ot"], 1),
+                    day_pay, ot_pay, round(m["food"], 2)])
+
     out.seek(0)
     label = date_filter or month
-    return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",
-        headers={"Content-Disposition":f"attachment; filename=attendance_{label}.csv"})
+    return StreamingResponse(
+        iter([out.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=attendance_{label}.csv"})
