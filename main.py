@@ -147,12 +147,14 @@ class EmployeeCreate(BaseModel):
     ifsc:            Optional[str] = None
     pan:             Optional[str] = None
 
+
 class SourcePerson(BaseModel):
     name:           str
     account_name:   Optional[str] = None
     account_number: Optional[str] = None
     ifsc:           Optional[str] = None
     pan:            Optional[str] = None
+
 
 class FaceDescriptorUpdate(BaseModel):
     face_descriptor: List[float]
@@ -466,4 +468,6 @@ def report_csv(month: Optional[str]=None, date_filter: Optional[str]=None, emp_i
     return StreamingResponse(
         iter([out.getvalue()]),
         media_type="text/csv",
+
         headers={"Content-Disposition": f"attachment; filename=attendance_{label}.csv"})
+
