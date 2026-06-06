@@ -453,7 +453,7 @@ def report_csv(month: Optional[str]=None, date_filter: Optional[str]=None, emp_i
 
     out = io.StringIO(); w = csv.writer(out)
     w.writerow(["Employee Name", "Department", "Source", "Location",
-                "Total Days", "OT Hours", "Day Pay (Rs)", "OT Pay (Rs)", "Food Allowance (Rs)"])
+                "Total Days", "OT Hours", "Day Pay", "OT Pay", "Food Allowance"])
     for m in summary.values():
         day_pay = round(m["present"] * ppd, 2)
         ot_pay  = round(m["ot"] * otp, 2)
