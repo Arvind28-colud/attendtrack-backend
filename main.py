@@ -23,10 +23,10 @@ app.add_middleware(CORSMiddleware,
 def get_db():
     ssl = {"ssl": {"ssl_mode": "REQUIRED"}} if os.getenv("DB_SSL", "true").lower() == "true" else {}
     return pymysql.connect(
-        host=os.getenv("DB_HOST","gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"),
+        host=os.getenv("DB_HOST"),
         port=int(os.getenv("DB_PORT","4000")),
-        user=os.getenv("DB_USER","dFJR6gPxogDgfwt.root"),
-        password=os.getenv("DB_PASSWORD","LUkrukogmL3hqLf0"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME","attendtrack"),
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
@@ -147,6 +147,10 @@ class EmployeeCreate(BaseModel):
     ifsc:            Optional[str] = None
     pan:             Optional[str] = None
 
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
 class SourcePerson(BaseModel):
     name:           str
     account_name:   Optional[str] = None
@@ -256,6 +260,15 @@ def update_aadhaar_pdf(emp_id: int, body: AadhaarPdfUpdate):
     db.commit(); db.close(); return {"message": "Aadhaar PDF saved"}
 
 # Note: face_descriptor stores 512-d ArcFace embeddings (cosine similarity, threshold 0.4)
+
+# ── ADMIN AUTH ──────────────────────────────────────────────────────────────
+@app.post("/admin/login")
+def admin_login(body: AdminLogin):
+    admin_user = os.getenv("ADMIN_USERNAME", "admin")
+    admin_pass = os.getenv("ADMIN_PASSWORD", "admin123")
+    if body.username != admin_user or body.password != admin_pass:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"username": body.username, "message": "Login successful"}
 
 # ── SOURCE PERSONS ──────────────────────────────────────────────────────────
 @app.get("/source-persons")
