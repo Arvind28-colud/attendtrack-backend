@@ -235,8 +235,14 @@ def create_employee(emp: EmployeeCreate):
              emp.account_name, emp.account_number, emp.ifsc, emp.pan))
         db.commit(); new_id = cur.lastrowid
     except pymysql.IntegrityError as e:
-        db.close(); raise HTTPException(409, str(e))
-    db.close(); return {"message": "Employee registered", "id": new_id}
+        db.close()
+        err = str(e)
+        if "aadhaar_no" in err:
+            raise HTTPException(409, "An employee with this Aadhaar number is already registered.")
+        elif "email" in err:
+            raise HTTPException(409, "An employee with this email is already registered.")
+        else:
+            raise HTTPException(409, "This employee already exists.")
 
 @app.put("/employees/{emp_id}/face")
 def update_face(emp_id: int, body: FaceDescriptorUpdate):
