@@ -60,8 +60,8 @@ def init_tables():
             id        INT AUTO_INCREMENT PRIMARY KEY,
             emp_id    INT NOT NULL,
             date      DATE NOT NULL,
-            clock_in  TIME,
-            clock_out TIME,
+            log_in  TIME,
+            log_out TIME,
             total_hrs DECIMAL(5,2) DEFAULT 0,
             ot_hrs    DECIMAL(5,2) DEFAULT 0,
             status    ENUM('on-duty','present','absent') DEFAULT 'absent',
@@ -171,7 +171,7 @@ class ClockAction(BaseModel):
     emp_id: int
 
 class ManualClockOut(BaseModel):
-    clock_out_time: str  # HH:MM
+    log_out_time: str  # HH:MM
 
 class SettingsUpdate(BaseModel):
     pay_per_day:      float
@@ -325,34 +325,34 @@ def clock(action: ClockAction):
     cur.execute("SELECT * FROM attendance WHERE emp_id=%s AND date=%s", (action.emp_id, today))
     att_row = cur.fetchone()
     if att_row is None:
-        cur.execute("INSERT INTO attendance (emp_id,date,clock_in,status) VALUES (%s,%s,%s,'on-duty')",
+        cur.execute("INSERT INTO attendance (emp_id,date,log_in,status) VALUES (%s,%s,%s,'on-duty')",
                     (action.emp_id, today, now_time))
         db.commit(); db.close()
-        return {"action": "clock_in", "time": now_time, "emp_name": emp["full_name"]}
+        return {"action": "log_in", "time": now_time, "emp_name": emp["full_name"]}
     att = att_row
-    ci = time_to_str(att["clock_in"]); co = time_to_str(att["clock_out"])
+    ci = time_to_str(att["log_in"]); co = time_to_str(att["log_out"])
     if ci and not co:
         in_min  = int(ci[:2]) * 60 + int(ci[3:5])
         out_min = int(now_time[:2]) * 60 + int(now_time[3:5])
         total   = round((out_min - in_min) / 60, 2)
         ot      = round(max(0, total - shift), 2)
-        cur.execute("""UPDATE attendance SET clock_out=%s,total_hrs=%s,ot_hrs=%s,status='present'
+        cur.execute("""UPDATE attendance SET log_out=%s,total_hrs=%s,ot_hrs=%s,status='present'
                        WHERE emp_id=%s AND date=%s""",
                     (now_time, total, ot, action.emp_id, today))
         db.commit(); db.close()
-        return {"action": "clock_out", "time": now_time,
+        return {"action": "log_out", "time": now_time,
                 "total_hrs": total, "ot_hrs": ot, "emp_name": emp["full_name"]}
     db.close(); raise HTTPException(400, "Already completed attendance today")
 
 @app.put("/attendance/{emp_id}/manual-clockout")
-def manual_clock_out(emp_id: int, date: str, body: ManualClockOut):
+def manual_log_out(emp_id: int, date: str, body: ManualClockOut):
     db = get_db(); cur = db.cursor()
     cur.execute("SELECT * FROM attendance WHERE emp_id=%s AND date=%s", (emp_id, date))
     att = cur.fetchone()
     if not att: db.close(); raise HTTPException(404, "Attendance record not found")
-    ci = time_to_str(att["clock_in"])
+    ci = time_to_str(att["log_in"])
     if not ci: db.close(); raise HTTPException(400, "No clock-in recorded")
-    co = body.clock_out_time
+    co = body.log_out_time
     in_min  = int(ci[:2])*60 + int(ci[3:5])
     out_min = int(co[:2])*60 + int(co[3:5])
     total   = round((out_min - in_min) / 60, 2)
@@ -360,10 +360,10 @@ def manual_clock_out(emp_id: int, date: str, body: ManualClockOut):
     emp_row = cur.fetchone()
     shift   = float(emp_row["shift_hrs"]) if emp_row else 8.0
     ot      = round(max(0, total - shift), 2)
-    cur.execute("""UPDATE attendance SET clock_out=%s, total_hrs=%s, ot_hrs=%s, status='present'
+    cur.execute("""UPDATE attendance SET log_out=%s, total_hrs=%s, ot_hrs=%s, status='present'
                    WHERE emp_id=%s AND date=%s""", (co, total, ot, emp_id, date))
     db.commit(); db.close()
-    return {"message": "Clock-out recorded", "clock_out": co, "total_hrs": total, "ot_hrs": ot}
+    return {"message": "Clock-out recorded", "log_out": co, "total_hrs": total, "ot_hrs": ot}
 
 # ── ATTENDANCE ───────────────────────────────────────────────────────────────
 @app.get("/attendance")
@@ -380,8 +380,8 @@ def get_attendance(emp_id: Optional[int]=None, month: Optional[str]=None, date_f
     cur.execute(q, p)
     result = []
     for d in cur.fetchall():
-        d["clock_in"]  = time_to_str(d["clock_in"])
-        d["clock_out"] = time_to_str(d["clock_out"])
+        d["log_in"]  = time_to_str(d["log_in"])
+        d["log_out"] = time_to_str(d["log_out"])
         d["date"]      = str(d["date"])
         result.append(d)
     db.close(); return result
@@ -404,10 +404,10 @@ def dashboard():
     absent = cur.fetchone()["c"] or 0
     cur.execute("SELECT COALESCE(SUM(ot_hrs),0) as s FROM attendance WHERE date=%s", (today,))
     ot = float(cur.fetchone()["s"] or 0)
-    cur.execute("""SELECT a.emp_id, a.clock_in, e.full_name FROM attendance a
+    cur.execute("""SELECT a.emp_id, a.log_in, e.full_name FROM attendance a
         JOIN employees e ON a.emp_id=e.id
         WHERE a.date=%s AND a.status='on-duty'""", (today,))
-    on_duty = [{"emp_id": r["emp_id"], "clock_in": time_to_str(r["clock_in"]), "name": r["full_name"]}
+    on_duty = [{"emp_id": r["emp_id"], "log_in": time_to_str(r["log_in"]), "name": r["full_name"]}
                for r in cur.fetchall()]
     cur.execute("""SELECT id, full_name, department FROM employees WHERE id NOT IN
         (SELECT emp_id FROM attendance WHERE date=%s AND status IN ('present','on-duty'))""", (today,))
@@ -468,7 +468,7 @@ def report_csv(month: Optional[str]=None, date_filter: Optional[str]=None, emp_i
         m["total"]   += 1
         if r["status"] in ("present", "on-duty"):
             m["present"] += 1
-            if time_before(r["clock_in"], food_cut):
+            if time_before(r["log_in"], food_cut):
                 m["food"] += food_amt
         m["ot"] += float(r["ot_hrs"] or 0)
 
