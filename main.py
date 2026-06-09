@@ -233,7 +233,13 @@ def create_employee(emp: EmployeeCreate):
              emp.aadhaar_no, emp.department, emp.location,
              emp.source, emp.shift_hrs, fd,
              emp.account_name, emp.account_number, emp.ifsc, emp.pan))
-        db.commit(); new_id = cur.lastrowid
+        db.commit()
+        new_id = cur.lastrowid
+        # TiDB sometimes returns 0 for lastrowid — fetch the actual ID
+        if not new_id:
+            cur.execute("SELECT id FROM employees WHERE aadhaar_no=%s", (emp.aadhaar_no,))
+            row = cur.fetchone()
+            new_id = row["id"] if row else None
     except pymysql.IntegrityError as e:
         db.close()
         err = str(e)
@@ -243,6 +249,10 @@ def create_employee(emp: EmployeeCreate):
             raise HTTPException(409, "An employee with this email is already registered.")
         else:
             raise HTTPException(409, "This employee already exists.")
+    db.close()
+    if not new_id:
+        raise HTTPException(500, "Employee created but ID could not be retrieved. Please try again.")
+    return {"message": "Employee registered", "id": new_id}
 
 @app.put("/employees/{emp_id}/face")
 def update_face(emp_id: int, body: FaceDescriptorUpdate):
