@@ -270,6 +270,14 @@ def admin_login(body: AdminLogin):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     return {"username": body.username, "message": "Login successful"}
 
+@app.post("/user/login")
+def user_login(body: AdminLogin):
+    user_name = os.getenv("USER_USERNAME", "user")
+    user_pass = os.getenv("USER_PASSWORD", "user123")
+    if body.username != user_name or body.password != user_pass:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    return {"username": body.username, "message": "Login successful"}
+
 # ── SOURCE PERSONS ──────────────────────────────────────────────────────────
 @app.get("/source-persons")
 def list_source_persons():
