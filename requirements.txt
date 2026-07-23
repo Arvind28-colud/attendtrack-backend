@@ -8,3 +8,4 @@ python-dotenv>=1.0.1
 numpy
 opencv-python-headless
 httpx
+openpyxl
